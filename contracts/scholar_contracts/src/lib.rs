@@ -365,6 +365,14 @@ impl ScholarContract {
             });
             
         scholarship.balance += amount;
+        env.storage().instance().set(&DataKey::Scholarship(student.clone()), &scholarship);
+
+        // Emit Scholarship_Granted event
+        #[allow(deprecated)]
+        env.events().publish(
+            (Symbol::new(&env, "Scholarship_Granted"), funder, student),
+            amount
+        );
         env.storage().persistent().set(&DataKey::Scholarship(student), &scholarship);
     }
 
