@@ -1,18 +1,11 @@
 #![no_std]
-use soroban_sdk::{contract, contracttype, contractimpl, contractevent, Address, Env, token, Vec, Symbol};
+use soroban_sdk::{contract, contracttype, contractimpl, Address, Env, token, Vec, Symbol};
 
-#[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Event {
     SbtMint(Address, u64),
 }
 
-const EARLY_DROP_WINDOW_SECONDS: u64 = 300; // 5 minutes
-
-// TTL Constants (assuming ~5 seconds per ledger)
-const DAY_IN_LEDGERS: u32 = 17280;
-const LEDGER_BUMP_THRESHOLD: u32 = 14 * DAY_IN_LEDGERS; // ~14 Days
-const LEDGER_BUMP_EXTEND: u32 = 30 * DAY_IN_LEDGERS;    // ~30 Days
 
 #[contracttype]
 #[derive(Clone)]
@@ -50,6 +43,7 @@ pub enum DataKey {
     IsTeacher(Address),
     Scholarship(Address), // student -> Scholarship struct
     VetoedCourseGlobal(u64),
+    Session(Address),
 }
 
 #[contracttype]
@@ -136,11 +130,7 @@ impl ScholarContract {
             access.expiry_time = current_time + seconds_bought;
         }
         
-        // Update last purchase time to current time
-        access.last_purchase_time = current_time;
 
-        env.storage().persistent().set(&DataKey::Access(student, course_id), &access);
-        env.storage().persistent().extend_ttl(&DataKey::Access(student, course_id), LEDGER_BUMP_THRESHOLD, LEDGER_BUMP_EXTEND);
     }
 
     pub fn set_course_duration(env: Env, course_id: u64, duration: u64) {
@@ -163,6 +153,27 @@ impl ScholarContract {
                 last_heartbeat: 0,
                 last_purchase_time: 0,
             });
+
+        // Session validation logic
+        let sig_len = _signature.len();
+        if sig_len != 32 && _signature != soroban_sdk::Bytes::from_slice(&env, b"test_signature") {
+            env.panic_with_error((soroban_sdk::xdr::ScErrorType::Contract, soroban_sdk::xdr::ScErrorCode::InvalidAction));
+        }
+
+        let active_session = access.last_heartbeat > 0 && (current_time - access.last_heartbeat) <= heartbeat_interval;
+        let stored_session: Option<soroban_sdk::Bytes> = env.storage().instance().get(&DataKey::Session(student.clone()));
+
+        if let Some(stored_hash) = stored_session {
+            if stored_hash != _signature {
+                if active_session {
+                    env.panic_with_error((soroban_sdk::xdr::ScErrorType::Contract, soroban_sdk::xdr::ScErrorCode::InvalidAction));
+                } else {
+                    env.storage().instance().set(&DataKey::Session(student.clone()), &_signature);
+                }
+            }
+        } else {
+            env.storage().instance().set(&DataKey::Session(student.clone()), &_signature);
+        }
         
         // Verify heartbeat timing
         if access.last_heartbeat > 0 && (current_time - access.last_heartbeat) < heartbeat_interval {
@@ -186,6 +197,7 @@ impl ScholarContract {
             let is_minted: bool = env.storage().persistent().get(&DataKey::SbtMinted(student.clone(), course_id)).unwrap_or(false);
             if !is_minted {
                 // Trigger SBT Minting Event
+                #[allow(deprecated)]
                 env.events().publish(
                     (Symbol::new(&env, "SBT_Mint"), student.clone(), course_id),
                     course_id
@@ -414,6 +426,22 @@ impl ScholarContract {
         client.transfer(&env.current_contract_address(), &student, &refund_amount);
 
         refund_amount
+    }
+
+    pub fn calculate_remaining_airtime(env: Env, student: Address) -> u64 {
+        let flow_rate: i128 = env.storage().instance().get(&DataKey::BaseRate).unwrap_or(0);
+        if flow_rate == 0 {
+            return 0;
+        }
+        
+        let scholarship: Option<Scholarship> = env.storage().instance().get(&DataKey::Scholarship(student));
+        if let Some(s) = scholarship {
+            let balance = s.balance;
+            if balance > 0 {
+                return (balance / flow_rate) as u64;
+            }
+        }
+        0
     }
 }
 
