@@ -487,6 +487,23 @@ impl ScholarContract {
         0
     }
 
+    pub fn withdraw_scholarship(env: Env, student: Address, amount: i128) {
+        student.require_auth();
+        
+        let mut scholarship: Scholarship = env.storage().instance()
+            .get(&DataKey::Scholarship(student.clone()))
+            .expect("No scholarship found");
+            
+        if scholarship.balance < amount {
+            env.panic_with_error((soroban_sdk::xdr::ScErrorType::Contract, soroban_sdk::xdr::ScErrorCode::InvalidAction));
+        }
+        
+        scholarship.balance -= amount;
+        env.storage().instance().set(&DataKey::Scholarship(student.clone()), &scholarship);
+        
+        // Transfer back to student
+        let client = token::Client::new(&env, &scholarship.token);
+        client.transfer(&env.current_contract_address(), &student, &amount);
     // Course Registry Management Functions
     
     pub fn add_course_to_registry(env: Env, course_id: u64, creator: Address) {
